@@ -18,14 +18,11 @@ jobs:
               with:
                   node-version: "20"
 
-            - name: Install deps
-              run: npm install --no-audit --no-fund
+            - run: npm install --no-audit --no-fund
 
-            - name: Build plugin(s)
-              run: node build.mjs
+            - run: node build.mjs
 
-            - name: Copy additional files
-              run: |
-                  cp README.md dist/README.md
-                  printf -- "---\npermalink: /404.html\n---\n" > dist/404.md
-                  printf -- "> **Note:** you got
+            - uses: peaceiris/actions-gh-pages@v4
+              with:
+                  github_token: ${{ secrets.GITHUB_TOKEN }}
+                  publish_dir: ./dist
