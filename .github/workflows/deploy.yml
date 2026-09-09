@@ -1,0 +1,31 @@
+name: Build and deploy
+
+on:
+    push:
+        branches: [main]
+    workflow_dispatch:
+
+jobs:
+    deploy:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: "20"
+
+            - name: Install deps
+              run: npm install --no-audit --no-fund
+
+            - name: Build plugin(s)
+              run: node build.mjs
+
+            - name: Copy additional files
+              run: |
+                  cp README.md dist/README.md
+                  printf -- "---\npermalink: /404.html\n---\n" > dist/404.md
+                  printf -- "> **Note:** you got
