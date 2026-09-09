@@ -1,0 +1,1 @@
+{"name":"BigUpload","description":"Routes files that exceed your Discord upload limit through an external host and sends the link instead.","authors":[{"name":"DogeTheGoober","id":"0"}],"main":"index.js","vendetta":{"icon":"ic_upload"},"hash":"66787d365dd86f6395833b5d5851adcdbcbe1c818f3a4b5dfeccb96bb1ba37d7"}
