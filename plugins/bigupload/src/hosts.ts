@@ -123,14 +123,7 @@ async function postForm(url: string, form: FormData): Promise<string> {
     }
 
     throw new Error(lastError || "upload failed");
-}
 
-    const text = (await res.text()).trim();
-
-    if (!res.ok) throw new Error(`${res.status}: ${text.slice(0, 120) || "no response body"}`);
-    if (!/^https?:\/\//.test(text)) throw new Error(text.slice(0, 120) || "host returned no URL");
-
-    return text;
 }
 
 export const HOSTS: Record<string, Host> = {
