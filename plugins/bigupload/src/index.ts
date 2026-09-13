@@ -112,3 +112,97 @@ async function offload(channelId: string, raw: LocalFile, size: number) {
 
             if (!storage.spoiler && !willEmbed(file.filename)) {
                 showToast("Sent as a link — Discord won't preview this file type", icon("Small"));
+            }
+        } else {
+            clipboard.setString(content);
+            showToast("Link copied to clipboard", icon("toast_copy_link"));
+        }
+    } catch (err: any) {
+        logger.error("[BigUpload] upload failed", err);
+        showToast(`${host.name} upload failed: ${err?.message ?? err}`, icon("Small"));
+    }
+}
+
+function hookUploads() {
+    if (!Uploader) {
+        showToast("BigUpload: couldn't hook Discord's uploader", icon("Small"));
+        return;
+    }
+
+    patches.push(
+        instead("uploadLocalFiles", Uploader, function (args: any[], orig: Function) {
+            const opts = args[0];
+            const items: any[] = opts?.items;
+
+            if (!Array.isArray(items) || items.length === 0) return orig.apply(this, args);
+
+            const limit = Math.max(1, Number(storage.limitMiB)) * 1024 * 1024;
+
+            // Sizing is async but the original call is sync, so we cancel here
+            // and re-dispatch the under-limit files ourselves a tick later.
+            (async () => {
+                try {
+                    const sized = await Promise.all(
+                        items.map(async entry => {
+                            const file = entry?.item ?? entry;
+                            return { entry, file, size: await fileSize(file) };
+                        }),
+                    );
+
+                    // size < 0 means "couldn't measure" — offload rather than
+                    // hand it to Discord and watch the send fail.
+                    const small = sized.filter(x => x.size >= 0 && x.size <= limit);
+                    const large = sized.filter(x => x.size < 0 || x.size > limit);
+
+                    // Anything we can squeeze under the cap goes back to Discord
+                    // as a genuine attachment, which beats any link we could post.
+                    const offloading: typeof large = [];
+
+                    for (const candidate of large) {
+                        const shrunk =
+                            storage.shrinkImages && candidate.size > 0
+                                ? await shrinkImage(candidate.file, candidate.size, limit)
+                                : null;
+
+                        if (shrunk) {
+                            const entry = candidate.entry?.item
+                                ? { ...candidate.entry, item: { ...candidate.entry.item, ...shrunk } }
+                                : { ...candidate.entry, ...shrunk };
+                            small.push({ entry, file: shrunk, size: limit });
+                            showToast(`Resized ${shrunk.filename} to fit`, icon("ic_image"));
+                        } else {
+                            offloading.push(candidate);
+                        }
+                    }
+
+                    if (small.length) {
+                        orig.call(this, { ...opts, items: small.map(x => x.entry) });
+                    }
+
+                    for (const { file, size } of offloading) {
+                        await offload(opts.channelId, file, size);
+                    }
+                } catch (err) {
+                    logger.error("[BigUpload] triage failed, falling back to Discord", err);
+                    orig.apply(this, args);
+                }
+            })();
+
+            return undefined; // swallow the original synchronous call
+        }),
+    );
+}
+
+export const onLoad = () => {
+    if (storage.raiseClientLimit) raiseClientLimit();
+    if (storage.shrinkImages && !canShrink) {
+        logger.warn("[BigUpload] ImageEditor unavailable; resize option will no-op");
+    }
+    hookUploads();
+};
+
+export const onUnload = () => {
+    for (const unpatch of patches.splice(0)) unpatch();
+};
+
+export const settings = Settings;
