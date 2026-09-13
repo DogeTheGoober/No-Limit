@@ -6,7 +6,7 @@ import { getAssetIDByName } from "@vendetta/ui/assets";
 import { logger } from "@vendetta";
 
 import { HOSTS, EMBED_PREFERENCE, LocalFile, normalizeName, willEmbed } from "./hosts";
-import { Uploader, MessageActions, PremiumLimits, fileSize } from "./modules";
+import { Uploader, MessageActions, fileSize, findLimitTargets } from "./modules";
 import { shrinkImage, canShrink } from "./shrink";
 import Settings from "./Settings";
 
@@ -46,17 +46,27 @@ function sendLink(channelId: string, content: string) {
  * become real Discord attachments.
  */
 function raiseClientLimit() {
-    if (!PremiumLimits) return;
+    const targets = findLimitTargets();
 
-    for (const key of ["getUserMaxFileSize", "getUploadLimit", "getMaxFileSizeMB"]) {
-        if (typeof PremiumLimits[key] !== "function") continue;
-        const asMegabytes = key === "getMaxFileSizeMB";
-        patches.push(
-            instead(key, PremiumLimits, () => (asMegabytes ? FAKE_LIMIT / 1048576 : FAKE_LIMIT)),
-        );
+    if (targets.length === 0) {
+        showToast("BigUpload: found no size checks to lift", icon("Small"));
+        return;
     }
-}
 
+    for (const { module, key, megabytes, predicate } of targets) {
+        try {
+            patches.push(
+                instead(key, module, () =>
+                    predicate ? false : megabytes ? FAKE_LIMIT / 1048576 : FAKE_LIMIT,
+                ),
+            );
+        } catch (err) {
+            logger.warn(`[BigUpload] could not patch ${key}`, err);
+        }
+    }
+
+    logger.log(`[BigUpload] lifted ${patches.length} size check(s)`);
+}
 /**
  * A link only becomes an inline preview if the host serves the raw bytes with
  * a usable Content-Type, so when the file is something Discord can render we
