@@ -77,7 +77,58 @@ function copyDiagnostics() {
         } catch (err: any) {
             out.push(`${label}: probe threw ${err?.message ?? err}`);
         }
-    }    const FM: any =
+    }    
+        // Whether the limit patches actually bite. Patching a module's exported
+    // function does not change internal call sites inside that same module, so
+    // a gate can read as "patched" and still block — calling them is the only
+    // way to know.
+    try {
+        const fu: any = findByProps("anyFileTooLarge", "maxFileSize");
+        const pl: any = findByProps("getUserMaxFileSize", "canUploadLargeFiles");
+        const probe = { filename: "probe.mp4", mimeType: "video/mp4", sizeBytes: 250 * 1e6, size: 250 * 1e6 };
+
+        const call = (label: string, fn: any, ...a: any[]) => {
+            try {
+                out.push(`  ${label} = ${JSON.stringify(fn?.(...a))}`);
+            } catch (e: any) {
+                out.push(`  ${label} threw ${e?.message ?? e}`);
+            }
+        };
+
+        out.push("post-patch gate values:");
+        call("maxFileSize()", fu?.maxFileSize);
+        call("getMaxRequestSize()", fu?.getMaxRequestSize);
+        call("anyFileTooLarge([probe])", fu?.anyFileTooLarge, [probe]);
+        call("uploadSumTooLarge([probe])", fu?.uploadSumTooLarge, [probe]);
+        call("classifyFile(probe)", fu?.classifyFile, probe);
+        call("classifyFileName(probe.mp4)", fu?.classifyFileName, "probe.mp4");
+        call("getUserMaxFileSize()", pl?.getUserMaxFileSize);
+        call("canUploadLargeFiles()", pl?.canUploadLargeFiles);
+    } catch (err: any) {
+        out.push(`gate probe failed: ${err?.message ?? err}`);
+    }
+
+    // Whatever renders the "exceeds the size limit" roadblock.
+    try {
+        const metro2: any = (globalThis as any).vendetta?.metro ?? {};
+        const seen = new Set<string>();
+        for (const m of metro2.findAll?.((m: any) => {
+            try {
+                return Object.keys(m ?? {}).some(k => /roadblock|premiumupsell|uploadlimit/i.test(k));
+            } catch {
+                return false;
+            }
+        }) ?? []) {
+            const keys = Object.keys(m).filter(k => /roadblock|upsell|limit|upload/i.test(k));
+            if (keys.length) seen.add(keys.sort().join(","));
+            if (seen.size >= 12) break;
+        }
+        out.push(`roadblock-ish modules (${seen.size}):`);
+        for (const k of seen) out.push(`  ${k}`);
+    } catch (err: any) {
+        out.push(`roadblock sweep failed: ${err?.message ?? err}`);
+    }
+    const FM: any =
         ReactNative.NativeModules.DCDFileManager ??
         ReactNative.NativeModules.RNFileManager ??
         ReactNative.NativeModules.FileManager;
