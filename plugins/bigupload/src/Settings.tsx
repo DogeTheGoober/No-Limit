@@ -38,29 +38,46 @@ function copyDiagnostics() {
     }
 
     // Anything upload-shaped, whatever it happens to be called this week.
+        // CloudUpload is the class that actually performs an upload on this build,
+    // so the hook has to go on its prototype — but the method names aren't
+    // visible from a props search, only from the prototype itself.
     try {
-        const seen = new Set<string>();
-        const matches = metro.findAll?.((m: any) => {
-            try {
-                return Object.keys(m ?? {}).some(k => /upload|attach/i.test(k));
-            } catch {
-                return false;
-            }
-        });
+        const mod: any = findByProps("CloudUpload");
+        const CU = mod?.CloudUpload;
 
-        for (const m of matches ?? []) {
-            const keys = Object.keys(m).filter(k => /upload|attach|file|size|limit/i.test(k));
-            if (keys.length) seen.add(keys.sort().join(","));
-            if (seen.size >= 25) break;
+        if (CU) {
+            const proto = CU.prototype ?? {};
+            out.push(`CloudUpload statics: ${Object.keys(CU).join(", ") || "(none)"}`);
+            out.push(`CloudUpload prototype: ${Object.getOwnPropertyNames(proto).join(", ")}`);
+            out.push(`CloudUpload arity: ${CU.length}`);
+        } else {
+            out.push("CloudUpload: not found via findByProps");
         }
-
-        out.push(`upload-ish modules (${seen.size}):`);
-        for (const k of seen) out.push(`  ${k}`);
     } catch (err: any) {
-        out.push(`sweep failed: ${err?.message ?? err}`);
+        out.push(`CloudUpload probe failed: ${err?.message ?? err}`);
     }
 
-    const FM: any =
+    // The size gates, so the limit-lifting patch can target real names.
+    for (const [label, probe] of [
+        ["fileUtils", ["anyFileTooLarge", "maxFileSize"]],
+        ["premiumLimits", ["getUserMaxFileSize", "canUploadLargeFiles"]],
+        ["attachmentPayload", ["getAttachmentPayload", "getFileContentLength"]],
+    ] as [string, string[]][]) {
+        try {
+            const mod: any = findByProps(...probe);
+            out.push(
+                `${label}: ${
+                    mod
+                        ? Object.keys(mod)
+                              .filter(k => typeof mod[k] === "function")
+                              .join(", ")
+                        : "null"
+                }`,
+            );
+        } catch (err: any) {
+            out.push(`${label}: probe threw ${err?.message ?? err}`);
+        }
+    }    const FM: any =
         ReactNative.NativeModules.DCDFileManager ??
         ReactNative.NativeModules.RNFileManager ??
         ReactNative.NativeModules.FileManager;
