@@ -9,6 +9,7 @@ import { HOSTS, EMBED_PREFERENCE, LocalFile, normalizeName, willEmbed } from "./
 import {
     CloudUpload,
     CloudUploadStatus,
+    FileUtils,
     MessageActions,
     fileSize,
     limitTargets,
@@ -54,13 +55,54 @@ function sendLink(channelId: string, content: string) {
  * This does nothing to the server-side limit — oversized files still never
  * become real Discord attachments.
  */
-function raiseClientLimit() {
+function function raiseClientLimit() {
     const targets = limitTargets();
+
+    // Zeroing the running total makes uploadSumTooLarge fall out false even
+    // when it computes the comparison internally rather than calling the
+    // exported gate.
+    if (FileUtils && typeof FileUtils.getUploadFileSizeSum === "function") {
+        targets.push({ module: FileUtils, key: "getUploadFileSizeSum", value: 0 });
+    }
 
     if (targets.length === 0) {
         showToast("BigUpload: found no size checks to lift", icon("Small"));
         return;
     }
+
+    // Assigned directly rather than through the patcher: routing these through
+    // instead() returned a constant `true` for every gate no matter what value
+    // was supplied, so the replacement never took effect. A plain assignment
+    // with the original stashed for unload has no such ambiguity.
+    for (const { module, key, value } of targets) {
+        const original = module[key];
+
+        try {
+            module[key] = () => value;
+        } catch {
+            try {
+                Object.defineProperty(module, key, {
+                    value: () => value,
+                    configurable: true,
+                    writable: true,
+                });
+            } catch (err) {
+                logger.warn(`[BigUpload] could not patch ${key}`, err);
+                continue;
+            }
+        }
+
+        patches.push(() => {
+            try {
+                module[key] = original;
+            } catch {
+                /* best effort on unload */
+            }
+        });
+    }
+
+    logger.log(`[BigUpload] lifted ${patches.length} gate(s)`);
+}
 
     for (const { module, key, value } of targets) {
         try {
