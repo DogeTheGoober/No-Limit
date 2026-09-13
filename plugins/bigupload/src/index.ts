@@ -55,7 +55,7 @@ function sendLink(channelId: string, content: string) {
  * This does nothing to the server-side limit — oversized files still never
  * become real Discord attachments.
  */
-function function raiseClientLimit() {
+function raiseClientLimit() {
     const targets = limitTargets();
 
     // Zeroing the running total makes uploadSumTooLarge fall out false even
