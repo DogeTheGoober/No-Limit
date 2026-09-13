@@ -150,12 +150,17 @@ export function findLimitTargets(): LimitTarget[] {
         }
     };
 
+    // Reached through the runtime global rather than an `import * as` — the
+    // bundler's namespace interop rebuilds the object with Object.keys(), which
+    // comes back empty for Vendetta's metro and silently nulls every lookup.
+    const metro: any = (globalThis as any).vendetta?.metro ?? {};
+
     // findAll isn't present on every Vendetta/Kettu build, so degrade gracefully.
-    const findAll = (metro as any).findAll ?? (metro as any).findByPropsAll;
+    const findAll = metro.findAll ?? metro.findByPropsAll;
 
     try {
-        if (typeof (metro as any).findAll === "function") {
-            for (const m of (metro as any).findAll((m: any) => {
+        if (typeof metro.findAll === "function") {
+            for (const m of metro.findAll((m: any) => {
                 try {
                     return Object.keys(m ?? {}).some(k => LIMIT_RE.test(k) || TOO_LARGE_RE.test(k));
                 } catch {
