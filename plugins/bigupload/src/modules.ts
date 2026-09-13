@@ -1,5 +1,4 @@
-import * as metro from "@vendetta/metro";
-const { findByProps } = metro;
+import { findByProps } from "@vendetta/metro";
 import { ReactNative } from "@vendetta/metro/common";
 import { logger } from "@vendetta";
 
