@@ -101,7 +101,7 @@ function raiseClientLimit() {
         });
     }
 
-    logger.log(`[BigUpload] lifted ${patches.length} gate(
+    logger.log(`[BigUpload] lifted ${patches.length} gate(s)`);
 }
 
 /**
