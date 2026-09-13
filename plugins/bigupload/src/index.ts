@@ -25,6 +25,7 @@ storage.spoiler ??= false;
 storage.raiseClientLimit ??= true;
 storage.preferEmbedHost ??= true;
 storage.shrinkImages ??= false;
+storage.showDetachToast ??= true;
 
 const patches: (() => void)[] = [];
 
@@ -172,7 +173,13 @@ function detach(upload: any) {
         }
     }
 
-    logger.log(`[BigUpload] detached via: ${done.join(", ") || "nothing"}`);
+    const summary = done.join(", ") || "nothing";
+    logger.log(`[BigUpload] detached via: ${summary}`);
+
+    // Surfaced as a toast rather than a log line: Kettu on iPadOS has no log
+    // viewer without a desktop devtools server, and this is the one fact needed
+    // to tell whether the teardown ran or threw.
+    if (storage.showDetachToast) showToast(`detached: ${summary}`, icon("ic_info_24px"));
 }
 
 async function offload(channelId: string, raw: LocalFile, size: number) {
