@@ -101,16 +101,7 @@ function raiseClientLimit() {
         });
     }
 
-    logger.log(`[BigUpload] lifted ${patches.length} gate(s)`);
-}
-
-    for (const { module, key, value } of targets) {
-        try {
-            patches.push(instead(key, module, () => value));
-        } catch (err) {
-            logger.warn(`[BigUpload] could not patch ${key}`, err);
-        }
-    }
+    logger.log(`[BigUpload] lifted ${patches.length} gate(
 }
 
 /**
