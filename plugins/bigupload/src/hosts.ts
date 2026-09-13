@@ -37,7 +37,11 @@ const MIME_EXT: Record<string, string> = {
     "image/heif": "heic",
     "video/mp4": "mp4",
     "video/webm": "webm",
-    "video/quicktime": "mov",
+    // iOS re-exports picked videos as QuickTime, but the payload is ordinary
+    // H.264 in an ISO base-media container. Discord's unfurler goes strictly by
+    // extension and refuses .mov, so naming it .mp4 is what buys the preview —
+    // and costs nothing, since a .mov URL never previews anyway.
+    "video/quicktime": "mp4",
 };
 
 export function extensionOf(name: string): string {
@@ -56,6 +60,8 @@ export function willEmbed(name: string): boolean {
  * all, either of which quietly costs us the preview — so fix the name up
  * before it ever reaches the host.
  */
+/** Extensions that are really MP4 in disguise; see the quicktime note above. */
+const REBRAND: Record<string, string> = { mov: "mp4", m4v: "mp4", qt: "mp4" };
 export function normalizeName(file: LocalFile): LocalFile {
     const fromMime = file.mimeType ? MIME_EXT[file.mimeType.toLowerCase().split(";")[0]] : "";
     const current = extensionOf(file.filename);
@@ -66,7 +72,7 @@ export function normalizeName(file: LocalFile): LocalFile {
         filename = `${filename}.${fromMime}`;
     } else if (current) {
         // Lowercase the extension; the unfurler is fussier than it should be.
-        filename = filename.replace(/\.[a-z0-9]{1,5}$/i, `.${current}`);
+        filename = filename.replace(/\.[a-z0-9]{1,5}$/i, `.${REBRAND[current] ?? current}`);
     }
 
     return { ...file, filename };
@@ -84,12 +90,40 @@ function filePart(file: LocalFile) {
     } as unknown as Blob;
 }
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 async function postForm(url: string, form: FormData): Promise<string> {
-    const res = await fetch(url, {
-        method: "POST",
-        body: form,
-        headers: { "User-Agent": UA },
-    });
+    let lastError = "";
+
+    // Catbox documents 500s and timeouts as throughput-driven rather than a
+    // rejection of the request, so a couple of spaced-out retries turns most
+    // of them into successes.
+    for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) await sleep(attempt * 3000);
+
+        const res = await fetch(url, {
+            method: "POST",
+            body: form,
+            headers: { "User-Agent": UA },
+        });
+
+        const text = (await res.text()).trim();
+
+        if (res.ok && /^https?:\/\//.test(text)) return text;
+
+        // An HTML error page is pages long; keep the toast readable and let the
+        // status code carry the meaning.
+        const detail = /^\s*<|<!doctype/i.test(text)
+            ? `server error ${res.status}`
+            : text.slice(0, 100) || `status ${res.status}`;
+
+        lastError = detail;
+
+        if (res.status < 500) break; // client errors will not improve on retry
+    }
+
+    throw new Error(lastError || "upload failed");
+}
 
     const text = (await res.text()).trim();
 
