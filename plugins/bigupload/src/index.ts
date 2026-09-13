@@ -35,7 +35,15 @@ function icon(name: string) {
         return undefined;
     }
 }
-
+/**
+ * Hermes does not reliably give each loop iteration its own binding for a
+ * captured variable, so building these replacements inline inside the loop made
+ * every gate return the last value assigned. A function call always gets a
+ * fresh frame, which makes the capture correct regardless of the engine.
+ */
+function constantFn(value: any) {
+    return () => value;
+}
 function limitBytes() {
     return Math.max(1, Number(storage.limitMiB)) * 1024 * 1024;
 }
@@ -77,12 +85,14 @@ function raiseClientLimit() {
     for (const { module, key, value } of targets) {
         const original = module[key];
 
+                const replacement = constantFn(value);
+
         try {
-            module[key] = () => value;
+            module[key] = replacement;
         } catch {
             try {
                 Object.defineProperty(module, key, {
-                    value: () => value,
+                    value: replacement,
                     configurable: true,
                     writable: true,
                 });
