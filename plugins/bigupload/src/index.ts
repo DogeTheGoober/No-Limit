@@ -35,6 +35,7 @@ function icon(name: string) {
         return undefined;
     }
 }
+
 /**
  * Hermes does not reliably give each loop iteration its own binding for a
  * captured variable, so building these replacements inline inside the loop made
@@ -44,6 +45,7 @@ function icon(name: string) {
 function constantFn(value: any) {
     return () => value;
 }
+
 function limitBytes() {
     return Math.max(1, Number(storage.limitMiB)) * 1024 * 1024;
 }
@@ -78,14 +80,9 @@ function raiseClientLimit() {
         return;
     }
 
-    // Assigned directly rather than through the patcher: routing these through
-    // instead() returned a constant `true` for every gate no matter what value
-    // was supplied, so the replacement never took effect. A plain assignment
-    // with the original stashed for unload has no such ambiguity.
     for (const { module, key, value } of targets) {
         const original = module[key];
-
-                const replacement = constantFn(value);
+        const replacement = constantFn(value);
 
         try {
             module[key] = replacement;
@@ -144,21 +141,38 @@ function toLocalFile(upload: any): LocalFile {
 }
 
 /**
- * Take the file off Discord's hands entirely: clear it from the pending draft
- * so the composer doesn't sit on "Sending…" waiting for an upload that will
- * never complete, then post the hosted link as an ordinary message.
+ * Take the file off Discord's hands entirely.
+ *
+ * Clearing the draft alone isn't enough: by the time upload() runs, Discord has
+ * already queued an outgoing message carrying this attachment, so it goes ahead,
+ * fails against the server-side cap, and leaves a "Failed to send message"
+ * corpse above the link. cancel() and delete() tear down the pending message
+ * itself, which is what actually stops that.
+ *
+ * Each step is attempted independently — the prototype varies between builds and
+ * a missing method shouldn't stop the rest from running.
  */
 function detach(upload: any) {
-    try {
-        upload.setStatus?.(CloudUploadStatus?.CANCELED ?? "CANCELED");
-    } catch {
-        /* status enum shape varies; not fatal */
+    const steps: [string, () => any][] = [
+        ["cancel", () => upload.cancel?.()],
+        ["_cancel", () => upload._cancel?.()],
+        ["removeFromMsgDraft", () => upload.removeFromMsgDraft?.()],
+        ["delete", () => upload.delete?.()],
+        ["setStatus", () => upload.setStatus?.(CloudUploadStatus?.CANCELED ?? "CANCELED")],
+    ];
+
+    const done: string[] = [];
+
+    for (const [name, run] of steps) {
+        try {
+            run();
+            done.push(name);
+        } catch (err) {
+            logger.warn(`[BigUpload] detach step ${name} failed`, err);
+        }
     }
-    try {
-        upload.removeFromMsgDraft?.();
-    } catch {
-        /* ditto */
-    }
+
+    logger.log(`[BigUpload] detached via: ${done.join(", ") || "nothing"}`);
 }
 
 async function offload(channelId: string, raw: LocalFile, size: number) {
