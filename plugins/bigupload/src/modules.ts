@@ -47,16 +47,66 @@ export const FileManager: any =
     ReactNative.NativeModules.RNFileManager ??
     ReactNative.NativeModules.FileManager;
 
-/** Best-effort byte size for a picked file. */
+/**
+ * Returns the file's size in bytes, or -1 when it genuinely cannot be
+ * determined. -1 rather than 0 matters: the caller treats unknown as
+ * "probably too big" and offloads, because guessing "small" hands the file
+ * straight to Discord, which is exactly the failure this plugin exists to
+ * avoid.
+ */
 export async function fileSize(item: any): Promise<number> {
-    if (typeof item?.size === "number" && item.size > 0) return item.size;
+    // The picked entry nests differently depending on where it came from.
+    for (const candidate of [item?.size, item?.fileSize, item?.item?.size, item?.file?.size]) {
+        const n = Number(candidate);
+        if (Number.isFinite(n) && n > 0) return n;
+    }
 
+    const uri: string = item?.uri ?? item?.item?.uri ?? "";
+
+    if (FileManager && uri) {
+        // DCDFileManager generally wants a bare path, not a file:// URL —
+        // passing the URL through is a silent no-result rather than an error.
+        const paths = [uri.replace(/^file:\/\//, ""), uri];
+        const methods = ["getSize", "getFileSize", "fileSize", "statFile", "stat", "getInfo"];
+
+        for (const method of methods) {
+            if (typeof FileManager[method] !== "function") continue;
+
+            for (const path of paths) {
+                try {
+                    const result = await FileManager[method](path);
+                    const n = Number(
+                        result && typeof result === "object"
+                            ? result.size ?? result.fileSize ?? result.length
+                            : result,
+                    );
+                    if (Number.isFinite(n) && n > 0) {
+                        logger.log(`[BigUpload] size ${n} via ${method}`);
+                        return n;
+                    }
+                } catch {
+                    /* try the next shape */
+                }
+            }
+        }
+
+        logger.warn(
+            `[BigUpload] FileManager methods available: ${Object.keys(FileManager).join(", ")}`,
+        );
+    }
+
+    // Reading the whole file just to measure it would mean holding a 240 MB
+    // buffer in JS, so only try this for things small enough to be harmless.
     try {
-        const reported = await FileManager?.getSize?.(item.uri);
-        if (reported) return Number(reported);
+        const blob = await (await fetch(uri)).blob();
+        if (blob?.size) return blob.size;
     } catch {
         /* fall through */
     }
+
+    logger.warn(`[BigUpload] no size for ${item?.filename ?? "file"}; assuming oversized`);
+    return -1;
+}
 
     // Last resort: let the platform read it. Costs a copy, so it's the fallback.
     try {
