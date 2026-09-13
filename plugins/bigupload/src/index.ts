@@ -6,7 +6,13 @@ import { getAssetIDByName } from "@vendetta/ui/assets";
 import { logger } from "@vendetta";
 
 import { HOSTS, EMBED_PREFERENCE, LocalFile, normalizeName, willEmbed } from "./hosts";
-import { Uploader, MessageActions, fileSize, findLimitTargets } from "./modules";
+import {
+    CloudUpload,
+    CloudUploadStatus,
+    MessageActions,
+    fileSize,
+    limitTargets,
+} from "./modules";
 import { shrinkImage, canShrink } from "./shrink";
 import Settings from "./Settings";
 
@@ -20,7 +26,6 @@ storage.preferEmbedHost ??= true;
 storage.shrinkImages ??= false;
 
 const patches: (() => void)[] = [];
-const FAKE_LIMIT = 4 * 1024 * 1024 * 1024; // 4 GiB, purely so the picker stops complaining
 
 function icon(name: string) {
     try {
@@ -28,6 +33,10 @@ function icon(name: string) {
     } catch {
         return undefined;
     }
+}
+
+function limitBytes() {
+    return Math.max(1, Number(storage.limitMiB)) * 1024 * 1024;
 }
 
 function sendLink(channelId: string, content: string) {
@@ -46,26 +55,20 @@ function sendLink(channelId: string, content: string) {
  * become real Discord attachments.
  */
 function raiseClientLimit() {
-    const targets = findLimitTargets();
+    const targets = limitTargets();
 
     if (targets.length === 0) {
         showToast("BigUpload: found no size checks to lift", icon("Small"));
         return;
     }
 
-    for (const { module, key, megabytes, predicate } of targets) {
+    for (const { module, key, value } of targets) {
         try {
-            patches.push(
-                instead(key, module, () =>
-                    predicate ? false : megabytes ? FAKE_LIMIT / 1048576 : FAKE_LIMIT,
-                ),
-            );
+            patches.push(instead(key, module, () => value));
         } catch (err) {
             logger.warn(`[BigUpload] could not patch ${key}`, err);
         }
     }
-
-    logger.log(`[BigUpload] lifted ${patches.length} size check(s)`);
 }
 
 /**
@@ -85,6 +88,34 @@ function pickHost(file: LocalFile, size: number) {
     }
 
     return chosen;
+}
+
+/** Pull a {uri, filename, mimeType} out of whatever shape the instance holds. */
+function toLocalFile(upload: any): LocalFile {
+    const item = upload?.item ?? upload;
+    return {
+        uri: item?.uri ?? upload?.uri ?? "",
+        filename: item?.filename ?? upload?.filename ?? "upload",
+        mimeType: item?.mimeType ?? upload?.mimeType ?? item?.type,
+    };
+}
+
+/**
+ * Take the file off Discord's hands entirely: clear it from the pending draft
+ * so the composer doesn't sit on "Sending…" waiting for an upload that will
+ * never complete, then post the hosted link as an ordinary message.
+ */
+function detach(upload: any) {
+    try {
+        upload.setStatus?.(CloudUploadStatus?.CANCELED ?? "CANCELED");
+    } catch {
+        /* status enum shape varies; not fatal */
+    }
+    try {
+        upload.removeFromMsgDraft?.();
+    } catch {
+        /* ditto */
+    }
 }
 
 async function offload(channelId: string, raw: LocalFile, size: number) {
@@ -124,67 +155,47 @@ async function offload(channelId: string, raw: LocalFile, size: number) {
 }
 
 function hookUploads() {
-    if (!Uploader) {
+    if (!CloudUpload?.prototype) {
         showToast("BigUpload: couldn't hook Discord's uploader", icon("Small"));
         return;
     }
 
     patches.push(
-        instead("uploadLocalFiles", Uploader, function (args: any[], orig: Function) {
-            const opts = args[0];
-            const items: any[] = opts?.items;
+        instead("upload", CloudUpload.prototype, function (args: any[], orig: Function) {
+            const upload = this;
 
-            if (!Array.isArray(items) || items.length === 0) return orig.apply(this, args);
-
-            const limit = Math.max(1, Number(storage.limitMiB)) * 1024 * 1024;
-
-            // Sizing is async but the original call is sync, so we cancel here
-            // and re-dispatch the under-limit files ourselves a tick later.
+            // upload() is fire-and-forget, so doing the sizing asynchronously
+            // and deciding afterwards is safe — nothing is awaiting a result.
             (async () => {
                 try {
-                    const sized = await Promise.all(
-                        items.map(async entry => {
-                            const file = entry?.item ?? entry;
-                            return { entry, file, size: await fileSize(file) };
-                        }),
-                    );
+                    const limit = limitBytes();
+                    const size = await fileSize(upload);
 
-                    // size < 0 means "couldn't measure" — offload rather than
-                    // hand it to Discord and watch the send fail.
-                    const small = sized.filter(x => x.size >= 0 && x.size <= limit);
-                    const large = sized.filter(x => x.size < 0 || x.size > limit);
+                    if (size >= 0 && size <= limit) return orig.apply(upload, args);
 
-                    // Anything we can squeeze under the cap goes back to Discord
-                    // as a genuine attachment, which beats any link we could post.
-                    const offloading: typeof large = [];
+                    const file = toLocalFile(upload);
 
-                    for (const candidate of large) {
-                        const shrunk =
-                            storage.shrinkImages && candidate.size > 0
-                                ? await shrinkImage(candidate.file, candidate.size, limit)
-                                : null;
-
+                    // Squeezing it under the cap beats any link we could post,
+                    // so try that before giving up on a real attachment.
+                    if (storage.shrinkImages && size > 0) {
+                        const shrunk = await shrinkImage(file, size, limit);
                         if (shrunk) {
-                            const entry = candidate.entry?.item
-                                ? { ...candidate.entry, item: { ...candidate.entry.item, ...shrunk } }
-                                : { ...candidate.entry, ...shrunk };
-                            small.push({ entry, file: shrunk, size: limit });
+                            if (upload.item) Object.assign(upload.item, shrunk);
+                            upload.filename = shrunk.filename;
                             showToast(`Resized ${shrunk.filename} to fit`, icon("ic_image"));
-                        } else {
-                            offloading.push(candidate);
+                            return orig.apply(upload, args);
                         }
                     }
 
-                    if (small.length) {
-                        orig.call(this, { ...opts, items: small.map(x => x.entry) });
-                    }
-
-                    for (const { file, size } of offloading) {
-                        await offload(opts.channelId, file, size);
-                    }
+                    detach(upload);
+                    await offload(upload.channelId, file, size);
                 } catch (err) {
                     logger.error("[BigUpload] triage failed, falling back to Discord", err);
-                    orig.apply(this, args);
+                    try {
+                        orig.apply(upload, args);
+                    } catch {
+                        /* nothing left to try */
+                    }
                 }
             })();
 
