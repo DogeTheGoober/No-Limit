@@ -108,18 +108,6 @@ export async function fileSize(item: any): Promise<number> {
     return -1;
 }
 
-    // Last resort: let the platform read it. Costs a copy, so it's the fallback.
-    try {
-        const blob = await (await fetch(item.uri)).blob();
-        if (blob?.size) return blob.size;
-    } catch {
-        /* fall through */
-    }
-
-    logger.warn(`[BigUpload] no size for ${item?.filename ?? "file"}; treating as under limit`);
-    return 0;
-}
-
 /**
  * Discord checks the size in more than one place, and the name of the getter
  * differs between builds — which is why pinning three names missed the picker's
