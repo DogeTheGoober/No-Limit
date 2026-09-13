@@ -21,12 +21,15 @@ export function findFirst(label: string, ...propSets: string[][]) {
     return null;
 }
 
-export const Uploader = findFirst(
-    "uploader",
-    ["uploadLocalFiles"],
-    ["uploadFiles", "cancelUpload"],
-    ["upload", "cancel", "getUploads"],
-);
+/**
+ * Current Discord mobile has no `uploadLocalFiles`. Each attachment gets its
+ * own CloudUpload instance and `upload()` on that instance is what actually
+ * ships the bytes, so that prototype method is the interception point.
+ */
+const CloudUploadModule: any = findFirst("CloudUpload", ["CloudUpload"]);
+
+export const CloudUpload: any = CloudUploadModule?.CloudUpload ?? null;
+export const CloudUploadStatus: any = CloudUploadModule?.CloudUploadStatus ?? null;
 
 export const MessageActions = findFirst(
     "MessageActions",
@@ -34,12 +37,12 @@ export const MessageActions = findFirst(
     ["sendMessage", "editMessage"],
 );
 
-export const PremiumLimits = findFirst(
-    "PremiumLimits",
-    ["getUserMaxFileSize", "getPremiumSubscriptionType"],
-    ["getUploadLimit"],
-    ["getMaxFileSizeMB"],
-);
+/** Client-side size gates. Real names, read off the running app. */
+export const FileUtils = findFirst("fileUtils", ["anyFileTooLarge", "maxFileSize"]);
+export const PremiumLimits = findFirst("premiumLimits", [
+    "getUserMaxFileSize",
+    "canUploadLargeFiles",
+]);
 
 export const FileManager: any =
     ReactNative.NativeModules.DCDFileManager ??
@@ -54,8 +57,13 @@ export const FileManager: any =
  * avoid.
  */
 export async function fileSize(item: any): Promise<number> {
-    // The picked entry nests differently depending on where it came from.
-    for (const candidate of [item?.size, item?.fileSize, item?.item?.size, item?.file?.size]) {
+    for (const candidate of [
+        item?.size,
+        item?.fileSize,
+        item?.currentSize,
+        item?.item?.size,
+        item?.file?.size,
+    ]) {
         const n = Number(candidate);
         if (Number.isFinite(n) && n > 0) return n;
     }
@@ -63,12 +71,11 @@ export async function fileSize(item: any): Promise<number> {
     const uri: string = item?.uri ?? item?.item?.uri ?? "";
 
     if (FileManager && uri) {
-        // DCDFileManager generally wants a bare path, not a file:// URL —
-        // passing the URL through is a silent no-result rather than an error.
+        // DCDFileManager wants a bare path, not a file:// URL — passing the
+        // URL through is a silent no-result rather than an error.
         const paths = [uri.replace(/^file:\/\//, ""), uri];
-        const methods = ["getSize", "getFileSize", "fileSize", "statFile", "stat", "getInfo"];
 
-        for (const method of methods) {
+        for (const method of ["getSize", "calculateSize"]) {
             if (typeof FileManager[method] !== "function") continue;
 
             for (const path of paths) {
@@ -88,19 +95,6 @@ export async function fileSize(item: any): Promise<number> {
                 }
             }
         }
-
-        logger.warn(
-            `[BigUpload] FileManager methods available: ${Object.keys(FileManager).join(", ")}`,
-        );
-    }
-
-    // Reading the whole file just to measure it would mean holding a 240 MB
-    // buffer in JS, so only try this for things small enough to be harmless.
-    try {
-        const blob = await (await fetch(uri)).blob();
-        if (blob?.size) return blob.size;
-    } catch {
-        /* fall through */
     }
 
     logger.warn(`[BigUpload] no size for ${item?.filename ?? "file"}; assuming oversized`);
@@ -108,82 +102,25 @@ export async function fileSize(item: any): Promise<number> {
 }
 
 /**
- * Discord checks the size in more than one place, and the name of the getter
- * differs between builds — which is why pinning three names missed the picker's
- * own check. Instead of guessing, sweep every loaded module for functions whose
- * name looks like a size limit and hand them all back to be patched.
+ * The functions Discord consults before letting a file through the picker.
+ * Targeted rather than swept: these names came off the running app, and a
+ * blanket sweep risks patching unrelated getters.
  */
-const LIMIT_RE = /^(get)?(user)?(max|upload)(file|attachment)?(size|limit)/i;
-const TOO_LARGE_RE = /(isfile)?toolarge|exceedsmax/i;
+export function limitTargets(): { module: any; key: string; value: any }[] {
+    const HUGE = 4 * 1024 * 1024 * 1024; // 4 GiB
+    const out: { module: any; key: string; value: any }[] = [];
 
-export interface LimitTarget {
-    module: any;
-    key: string;
-    /** true when the function reports megabytes rather than bytes */
-    megabytes: boolean;
-    /** true when it answers "is this too big?" and should return false */
-    predicate: boolean;
-}
-
-export function findLimitTargets(): LimitTarget[] {
-    const seen = new Set<any>();
-    const targets: LimitTarget[] = [];
-
-    const scan = (module: any) => {
-        if (!module || seen.has(module) || typeof module !== "object") return;
-        seen.add(module);
-
-        for (const key of Object.keys(module)) {
-            let value: any;
-            try {
-                value = module[key];
-            } catch {
-                continue; // some props throw on access
-            }
-            if (typeof value !== "function") continue;
-
-            if (TOO_LARGE_RE.test(key)) {
-                targets.push({ module, key, megabytes: false, predicate: true });
-            } else if (LIMIT_RE.test(key)) {
-                targets.push({ module, key, megabytes: /mb$/i.test(key), predicate: false });
-            }
-        }
+    const add = (module: any, key: string, value: any) => {
+        if (module && typeof module[key] === "function") out.push({ module, key, value });
     };
 
-    // Reached through the runtime global rather than an `import * as` — the
-    // bundler's namespace interop rebuilds the object with Object.keys(), which
-    // comes back empty for Vendetta's metro and silently nulls every lookup.
-    const metro: any = (globalThis as any).vendetta?.metro ?? {};
+    add(FileUtils, "maxFileSize", HUGE);
+    add(FileUtils, "getMaxRequestSize", HUGE);
+    add(FileUtils, "anyFileTooLarge", false);
+    add(FileUtils, "uploadSumTooLarge", false);
+    add(PremiumLimits, "getUserMaxFileSize", HUGE);
+    add(PremiumLimits, "canUploadLargeFiles", true);
 
-    // findAll isn't present on every Vendetta/Kettu build, so degrade gracefully.
-    const findAll = metro.findAll ?? metro.findByPropsAll;
-
-    try {
-        if (typeof metro.findAll === "function") {
-            for (const m of metro.findAll((m: any) => {
-                try {
-                    return Object.keys(m ?? {}).some(k => LIMIT_RE.test(k) || TOO_LARGE_RE.test(k));
-                } catch {
-                    return false;
-                }
-            })) scan(m);
-        } else if (typeof findAll === "function") {
-            for (const name of ["getUserMaxFileSize", "getUploadLimit", "getMaxFileSizeMB"]) {
-                for (const m of findAll(name) ?? []) scan(m);
-            }
-        }
-    } catch (err) {
-        logger.warn("[BigUpload] module sweep failed", err);
-    }
-
-    // Always include the originally-targeted module, sweep or no sweep.
-    scan(PremiumLimits);
-
-    logger.log(
-        `[BigUpload] size-limit functions found: ${
-            targets.map(t => t.key).join(", ") || "NONE"
-        }`,
-    );
-
-    return targets;
+    logger.log(`[BigUpload] size gates found: ${out.map(t => t.key).join(", ") || "NONE"}`);
+    return out;
 }
